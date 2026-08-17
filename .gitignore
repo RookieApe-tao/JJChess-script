@@ -1,0 +1,27 @@
+# 构建输出
+**/bin/
+**/obj/
+*.apk
+*.aab
+!release/*.apk
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+# 发布包（大文件走 GitHub Release，不入库；目录内说明文件除外）
+release/*
+!release/README.md
+
+# 临时文件
+*.tmp
+*.log
+~$*
+Thumbs.db
+.DS_Store
+
+# 第三方上游，含其自身 142MB .git 历史，不入库（模型文件已在 app/Resources/Raw 与 xiangqi-pwa-offline 工作树内）
+xiangqi-pwa-offline/

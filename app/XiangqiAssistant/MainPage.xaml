@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="XiangqiAssistant.MainPage"
+             Title="象棋助手">
+
+    <VerticalStackLayout Padding="24" Spacing="16" VerticalOptions="Center">
+        <Label Text="象棋助手" FontSize="30" FontAttributes="Bold" HorizontalOptions="Center" />
+        <Label Text="悬浮窗启动后：切到 JJ 象棋 → 点悬浮窗的「分析」→ 自动截图识别并给出最优下一步。全部在手机本地运行，无需联网。" 
+               FontSize="14" TextColor="Gray" />
+        <Button x:Name="StartBtn" Text="授权并启动悬浮窗" Clicked="OnStartClicked" />
+        <Button x:Name="StopBtn" Text="停止悬浮窗" IsVisible="False" Clicked="OnStopClicked" />
+        <Label x:Name="StatusLabel" FontSize="13" TextColor="#3366cc" />
+    </VerticalStackLayout>
+
+</ContentPage>

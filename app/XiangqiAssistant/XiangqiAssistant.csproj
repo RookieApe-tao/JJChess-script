@@ -1,0 +1,59 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net10.0-android36.0</TargetFrameworks>
+
+    <OutputType>Exe</OutputType>
+    <RootNamespace>XiangqiAssistant</RootNamespace>
+    <UseMaui>true</UseMaui>
+    <SingleProject>true</SingleProject>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+
+    <ApplicationTitle>象棋助手</ApplicationTitle>
+    <ApplicationId>com.xiangqiassistant.app</ApplicationId>
+    <ApplicationDisplayVersion>1.0</ApplicationDisplayVersion>
+    <ApplicationVersion>1</ApplicationVersion>
+
+    <SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'">26.0</SupportedOSPlatformVersion>
+    <AndroidPackageFormat>apk</AndroidPackageFormat>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <PublishTrimmed>false</PublishTrimmed>
+    <RunAOTCompilation>false</RunAOTCompilation>
+    <AndroidKeyStore>true</AndroidKeyStore>
+    <AndroidSigningKeyStore>C:\Users\Administrator\.android\debug.keystore</AndroidSigningKeyStore>
+    <AndroidSigningKeyAlias>androiddebugkey</AndroidSigningKeyAlias>
+    <AndroidSigningKeyPass>android</AndroidSigningKeyPass>
+    <AndroidSigningStorePass>android</AndroidSigningStorePass>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\XiangqiCore\XiangqiCore.csproj" />
+    <PackageReference Include="Microsoft.Maui.Controls" Version="10.0.20" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- App Icon / Splash -->
+    <MauiIcon Include="Resources\AppIcon\appicon.svg" ForegroundFile="Resources\AppIcon\appiconfg.svg" Color="#512BD4" />
+    <MauiSplashScreen Include="Resources\Splash\splash.svg" Color="#512BD4" BaseSize="128,128" />
+    <MauiImage Include="Resources\Images\*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Offline assets: models + weights (engine ships as a native lib, see below) -->
+    <MauiAsset Include="Resources\Raw\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Pikafish engine: must live in the read-only, executable nativeLibraryDir.
+         Android 10+ (targetSdk 29+) forbids execve from the writable app files dir
+         (SELinux W^X), so we ship the prebuilt static arm64 ELF as a "lib*.so" and
+         run it from ApplicationInfo.NativeLibraryDir. -->
+    <AndroidNativeLibrary Include="Platforms\Android\lib\arm64-v8a\libpikafish.so">
+      <Abi>arm64-v8a</Abi>
+    </AndroidNativeLibrary>
+  </ItemGroup>
+
+</Project>
