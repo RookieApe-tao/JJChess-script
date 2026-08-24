@@ -155,10 +155,26 @@ using (var tsvc = new TrackingAnalysisService(new BoardRecognizer(Models), Engin
     var ok1 = nc.Result == TrackerMatch.Kind.NoChange && !string.IsNullOrEmpty(nc.Advice);
     if (!ok1) failures++;
     Console.WriteLine($"{(ok1 ? "OK  " : "FAIL")} track-svc nochange: result={nc.Result} advice={(nc.Advice ?? "").Replace("\n", " | ")}");
+    var rec = tsvc.TrackOnly(boardImg); // 记录按钮：不跑引擎，同帧 -> NoChange + 手数
+    var ok1b = rec.Result == TrackerMatch.Kind.NoChange && rec.MoveCountText == "本局尚未走子";
+    if (!ok1b) failures++;
+    Console.WriteLine($"{(ok1b ? "OK  " : "FAIL")} track-svc trackonly: result={rec.Result} count={(rec.MoveCountText ?? "").Replace("\n", " | ")}");
     var lt = tsvc.Analyze(midImg, 1500); // 起始 -> 中局（差很多步）-> LostTrack
     var ok2 = lt.Result == TrackerMatch.Kind.LostTrack;
     if (!ok2) failures++;
     Console.WriteLine($"{(ok2 ? "OK  " : "FAIL")} track-svc losttrack start->mid: result={lt.Result}");
+    // 应急重校：中局混乱 -> 全量识别重建基线 -> 继续跟踪
+    var (rok, rmsg) = tsvc.Resync(midImg, false, jjcal, 1500);
+    var rokFen = tsvc.CurrentFen == "2baka1nr/9/1cn1b2R1/p1C1p1p1p/9/9/r1P1P1P1P/2N1C1N2/9/2BAKAB2 w";
+    var rokTrack = false;
+    if (rok && rokFen)
+    {
+        var after = tsvc.Analyze(midImg, 1500); // 同帧 -> NoChange，跟踪在新基线上继续
+        rokTrack = after.Result == TrackerMatch.Kind.NoChange && !string.IsNullOrEmpty(after.Advice);
+    }
+    var ok3 = rok && rokFen && rokTrack;
+    if (!ok3) failures++;
+    Console.WriteLine($"{(ok3 ? "OK  " : "FAIL")} track-svc resync mid: ok={rok} fenOk={rokFen} trackContinues={rokTrack} msg={rmsg.Replace("\n", " | ")}");
 }
 
 // ---------- 我方黑 引导 bootstrap（真机截图，对方已秒走首招；reverseRows 180°，不旋转）----------
@@ -171,7 +187,7 @@ using (var tsvc = new TrackingAnalysisService(new BoardRecognizer(Models), Engin
         using var tsvc2 = new TrackingAnalysisService(new BoardRecognizer(Models), Engine, Nnue);
         using var bs = SKBitmap.Decode(p);
         var msg = tsvc2.Reset(bs, true, bcal);
-        var ok = msg.Contains("马二进三");
+        var ok = msg.Contains("马二进三") && tsvc2.MoveCount == 1 && tsvc2.MoveLog[0] == "对方 马二进三";
         if (!ok) failures++;
         Console.WriteLine($"{(ok ? "OK  " : "FAIL")} black bootstrap after 马二进三: {msg.Replace("\n", " | ")}");
     }

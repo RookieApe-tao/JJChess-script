@@ -159,7 +159,7 @@ public class AssistantService : Service
         close.SetTextColor(AColor.ParseColor("#666666"));
         close.Click += (_, _) => { StopSelf(); RemoveOverlay(); };
 
-        // 按钮区：2×2 表格，左列（新局、我方），右列（分析，跨两行）。
+        // 按钮区：左列纵排（新局、我方），中列（应急，跨两行），右列（分析、记录）。
         var newGame = new AButton(this) { Text = "新局", TextSize = 12 };
         newGame.SetAllCaps(false);
         newGame.Click += (_, _) => _handler?.Post(() => NewGame());
@@ -174,17 +174,31 @@ public class AssistantService : Service
             PostResult("已切换我方，请重新点『新局』。");
         };
 
-        var analyze = new AButton(this) { Text = "分析", TextSize = 20 };
+        var analyze = new AButton(this) { Text = "分析", TextSize = 14 };
         analyze.SetAllCaps(false);
         analyze.Click += (_, _) => _handler?.Post(() => CaptureAndAnalyze());
 
+        var record = new AButton(this) { Text = "记录", TextSize = 14 };
+        record.SetAllCaps(false);
+        record.Click += (_, _) => _handler?.Post(() => CaptureAndRecord());
+
+        var resync = new AButton(this) { Text = "应急", TextSize = 14 };
+        resync.SetAllCaps(false);
+        resync.Click += (_, _) => _handler?.Post(() => CaptureAndResync());
+
+        // 三列：左列（新局、我方），中列（应急，跨两行），右列（分析、记录）。
         var leftCol = new ALinearLayout(this) { Orientation = Orientation.Vertical };
         leftCol.AddView(newGame, new ALinearLayout.LayoutParams(ViewGroup.LayoutParams.MatchParent, 0, 1f));
         leftCol.AddView(_sideBtn, new ALinearLayout.LayoutParams(ViewGroup.LayoutParams.MatchParent, 0, 1f));
 
+        var rightCol = new ALinearLayout(this) { Orientation = Orientation.Vertical };
+        rightCol.AddView(analyze, new ALinearLayout.LayoutParams(ViewGroup.LayoutParams.MatchParent, 0, 1f));
+        rightCol.AddView(record, new ALinearLayout.LayoutParams(ViewGroup.LayoutParams.MatchParent, 0, 1f));
+
         _ctrlRow = new ALinearLayout(this) { Orientation = Orientation.Horizontal };
         _ctrlRow.AddView(leftCol, new ALinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WrapContent, 1f));
-        _ctrlRow.AddView(analyze, new ALinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WrapContent, 1f));
+        _ctrlRow.AddView(resync, new ALinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MatchParent, 1f));
+        _ctrlRow.AddView(rightCol, new ALinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WrapContent, 1f));
 
         var bg = new GradientDrawable();
         bg.SetColor(AColor.ParseColor(ColorIdle));
@@ -217,7 +231,7 @@ public class AssistantService : Service
         }));
 
         var lp = new WindowManagerLayoutParams(
-            (int)(250 * density),
+            (int)(320 * density),
             ViewGroup.LayoutParams.WrapContent,
             WindowManagerTypes.ApplicationOverlay,
             WindowManagerFlags.NotFocusable | WindowManagerFlags.NotTouchModal | WindowManagerFlags.LayoutInScreen,
@@ -257,14 +271,16 @@ public class AssistantService : Service
         }
         if (_analysis is null)
         {
-            // 引擎初始化中：背景变黄，等初始化完成自动补一次分析（不显示“识别中”文本）
+            // 引擎初始化中：背景变黄，等初始化完成自动补一次分析
             EnsureAnalysis(() => _handler?.Post(() => { if (!_busy) CaptureAndAnalyze(); }));
             SetOverlayColor(ColorBusy);
+            PostResult("初始化中....");
             return;
         }
 
         _busy = true;
-        SetOverlayColor(ColorBusy); // 识别中：仅背景变黄，不改文本
+        SetOverlayColor(ColorBusy);
+        PostResult("分析中...."); // 提示正在分析，避免用户以为没点上
         Task.Run(() =>
         {
             try
@@ -283,12 +299,89 @@ public class AssistantService : Service
         });
     }
 
+    /// <summary>「记录」：只跟踪走子、累计手数，不跑引擎（比「分析」快得多）。</summary>
+    private void CaptureAndRecord()
+    {
+        if (_busy) return;
+        if (_reader is null || _virtualDisplay is null)
+        {
+            PostResult("录屏权限未就绪");
+            SetOverlayColor(ColorErr);
+            return;
+        }
+        if (_analysis is null)
+        {
+            EnsureAnalysis(() => _handler?.Post(() => { if (!_busy) CaptureAndRecord(); }));
+            SetOverlayColor(ColorBusy);
+            return;
+        }
+
+        _busy = true;
+        SetOverlayColor(ColorBusy);
+        Task.Run(() =>
+        {
+            try
+            {
+                using var bmp = CaptureFrame();
+                var result = _analysis.TrackOnly(bmp);
+                PostResult(FormatTracking(result));
+                SetOverlayColor(ColorFor(result));
+            }
+            catch (Exception ex)
+            {
+                PostResult($"记录失败: {ex.Message}");
+                SetOverlayColor(ColorErr);
+            }
+            finally { _busy = false; }
+        });
+    }
+
+    /// <summary>「应急」：记录混乱时全量识别当前画面，重建跟踪基线（手数清零）。</summary>
+    private void CaptureAndResync()
+    {
+        if (_busy) return;
+        if (_reader is null || _virtualDisplay is null)
+        {
+            PostResult("录屏权限未就绪");
+            SetOverlayColor(ColorErr);
+            return;
+        }
+        if (_analysis is null)
+        {
+            EnsureAnalysis(() => _handler?.Post(() => { if (!_busy) CaptureAndResync(); }));
+            SetOverlayColor(ColorBusy);
+            PostResult("初始化中....");
+            return;
+        }
+
+        _busy = true;
+        SetOverlayColor(ColorBusy);
+        PostResult("应急重校中...."); // 全量识别 + 引擎，需数秒
+        Task.Run(() =>
+        {
+            try
+            {
+                using var bmp = CaptureFrame();
+                var (ok, msg) = _analysis.Resync(bmp, _mySide == "b", JjCalibration.Instance, movetimeMs: 5000);
+                PostResult(msg);
+                SetOverlayColor(ok ? ColorOk : ColorErr);
+            }
+            catch (Exception ex)
+            {
+                PostResult($"应急重校失败: {ex.Message}");
+                SetOverlayColor(ColorErr);
+            }
+            finally { _busy = false; }
+        });
+    }
+
     private static string FormatTracking(TrackingResult r)
     {
         if (r.Result == TrackerMatch.Kind.LostTrack)
             return r.Reason ?? "跟踪失败，请点『新局』重置后重试。";
         var lines = new List<string>();
         if (!string.IsNullOrEmpty(r.MoveSummary)) lines.Add(r.MoveSummary);
+        if (!string.IsNullOrEmpty(r.MoveCountText)) lines.Add(r.MoveCountText);
         if (!string.IsNullOrEmpty(r.Advice)) lines.Add(r.Advice);
         return lines.Count > 0 ? string.Join("\n", lines) : "就绪";
     }

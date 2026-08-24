@@ -13,6 +13,8 @@ public sealed class TrackingResult
     public string? Advice { get; set; }
     /// <summary>本次走子序列摘要，如“你 兵五进一 → 对方 炮8平5”。NoChange 时为 null。</summary>
     public string? MoveSummary { get; set; }
+    /// <summary>本局累计手数文本，如“已 6 手（你 3 / 对方 3）”。跟踪成功（NoChange/Matched）时有值。</summary>
+    public string? MoveCountText { get; set; }
     public List<MoveCandidate> Candidates { get; } = new();
 }
 
@@ -27,6 +29,7 @@ public sealed class TrackingAnalysisService : IDisposable
     private const float SettleThreshold = 0.35f; // 检测框中心离格点超过此分数 -> 视为棋子仍在移动
 
     private readonly MoveTracker _tracker;
+    private readonly BoardRecognizer _recognizer; // 应急重校需绕过跟踪直接全量识别
     private XiangqiEngine _engine; // 引擎异常退出后需重启，故非 readonly
     private readonly string _engineExe;
     private readonly string _nnuePath;
@@ -41,12 +44,16 @@ public sealed class TrackingAnalysisService : IDisposable
     private SKBitmap? _confirmedFrame;   // 仅棋盘区域裁剪，供下一帧像素 diff
     private Occupancy? _confirmedOcc;
     private List<MoveCandidate> _lastCandidates = new();
+    private readonly List<string> _moveLog = new(); // 本局每步记谱（中文，含 你/对方 前缀）
+    private int _moveCount;
+    private int _preMatchLogCount; // 上次提交前的日志长度，供 Undo 整体回退（一次可确认 1–2 步）
 
     public bool Tracking { get; private set; }
 
     public TrackingAnalysisService(BoardRecognizer recognizer, string engineExe, string nnuePath)
     {
         _tracker = new MoveTracker(recognizer);
+        _recognizer = recognizer;
         _engineExe = engineExe;
         _nnuePath = nnuePath;
         _engine = XiangqiEngine.Start(engineExe, nnuePath);
@@ -60,6 +67,8 @@ public sealed class TrackingAnalysisService : IDisposable
         _mySideBlack = mySideBlack;
         _cal = cal;
         _lastCandidates = new List<MoveCandidate>();
+        _moveLog.Clear();
+        _moveCount = 0;
         // null 让 BuildOccupancy 从当前帧自动计算 colOffset/rowOffset，避免校准偏移时行列持续错位。
         var cur = _tracker.BuildOccupancy(startFrame, _cal, mySideBlack, null, null);
         _pinnedColOffset = cur.ColOffset;
@@ -73,6 +82,7 @@ public sealed class TrackingAnalysisService : IDisposable
         {
             _fen = match.Top.ResultingFen;
             _preMatchFen = _fen;
+            AppendMovesToLog(match.Top, 'w');
             var who = SideChar(_fen) == (mySideBlack ? 'b' : 'w') ? "你" : "对方";
             msg = $"已设为开局，识别到：{FormatMoves(match.Top, 'w')}\n轮到{who}走，点『分析』获取建议。";
         }
@@ -110,6 +120,71 @@ public sealed class TrackingAnalysisService : IDisposable
         return msg;
     }
 
+    /// <summary>应急重校：记录混乱时，放弃增量跟踪历史，对当前帧做全量识别直接重建基线。
+    /// 手数清零重计。轮到方设为我方（发现乱账时通常轮到自己走）。
+    /// 返回 (是否成功, 提示文本)。</summary>
+    public (bool Ok, string Message) Resync(SKBitmap frame, bool mySideBlack, Calibration cal, int movetimeMs)
+    {
+        // 与 Reset 相同的朝向/占位参数，保证后续 Analyze 在同一坐标系下继续。
+        _mySideBlack = mySideBlack;
+        _cal = cal;
+        _lastCandidates = new List<MoveCandidate>();
+
+        var occ = _tracker.BuildOccupancy(frame, cal, mySideBlack, null, null);
+        _pinnedColOffset = occ.ColOffset;
+        _pinnedRowOffset = occ.RowOffset;
+
+        // 全量识别（检测 + 分类 + 着色 + 合法性修正），不依赖任何历史 FEN。
+        var side = mySideBlack ? "b" : "w";
+        var rec = _recognizer.Analyze(frame, cal, side, reverseRows: mySideBlack);
+        var fen = rec.Fen;
+
+        // 基本校验：双方将/帅各 1 个，且与检测占位一致（分类错误通常表现为占位对不上或双将）。
+        var kings = CountKings(fen);
+        if (kings != (1, 1) || !PlacementMatches(fen, occ))
+        {
+            var reason = kings != (1, 1)
+                ? $"将/帅识别异常（红{kings.Item1}黑{kings.Item2}）"
+                : "识别结果与棋子占位不一致";
+            return (false, $"应急重校失败：{reason}。\n请确保棋子静止、棋盘完整可见后重试，或点『新局』。");
+        }
+
+        _fen = fen;
+        _preMatchFen = fen;
+        _moveLog.Clear();
+        _moveCount = 0;
+        _preMatchLogCount = 0;
+        _confirmedOcc = occ;
+        StoreFrame(frame);
+        Tracking = true;
+
+        var advice = EngineAdvice(_fen, movetimeMs);
+        return (true, $"应急重校成功，手数已清零。\n{advice}");
+    }
+
+    /// <summary>数 FEN 里红帅/黑将的个数。</summary>
+    private static (int Red, int Black) CountKings(string fen)
+    {
+        var red = 0; var black = 0;
+        foreach (var ch in fen)
+        {
+            if (ch == 'K') red++;
+            else if (ch == 'k') black++;
+        }
+        return (red, black);
+    }
+
+    /// <summary>全量识别出的 FEN 占位是否与检测器占位完全一致（分类异常时的兜底校验）。</summary>
+    private static bool PlacementMatches(string fen, Occupancy occ)
+    {
+        var (b, _) = Notation.ParseFen(fen);
+        for (var r = 0; r < 10; r++)
+            for (var c = 0; c < 9; c++)
+                if ((b[r, c] is not null) != occ.Filled[r, c])
+                    return false;
+        return true;
+    }
+
     private static Occupancy OccupancyFromFen(string fen)
     {
         var (b, _) = Notation.ParseFen(fen);
@@ -142,6 +217,31 @@ public sealed class TrackingAnalysisService : IDisposable
     /// <summary>分析当前帧：跟踪 1–2 步 -> 更新 FEN -> 引擎建议。</summary>
     public TrackingResult Analyze(SKBitmap frame, int movetimeMs)
     {
+        var result = TrackCore(frame);
+        if (result.Result == TrackerMatch.Kind.NoChange || result.Result == TrackerMatch.Kind.Matched)
+            result.Advice = EngineAdvice(_fen, movetimeMs);
+        return result;
+    }
+
+    /// <summary>只跟踪走子、不跑引擎（用于「记录」按钮：快速记下手数，不需要建议时用）。</summary>
+    public TrackingResult TrackOnly(SKBitmap frame) => TrackCore(frame);
+
+    /// <summary>“已 N 手（你 M / 对方 K）”格式的当前手数文本。</summary>
+    public string MoveCountText
+    {
+        get
+        {
+            var my = 0; var opp = 0;
+            foreach (var s in _moveLog) { if (s.StartsWith("你")) my++; else opp++; }
+            return _moveCount == 0
+                ? "本局尚未走子"
+                : $"已 {_moveCount} 手（你 {my} / 对方 {opp}）";
+        }
+    }
+
+    /// <summary>跟踪当前帧并更新 FEN/记录；引擎调用由调用方决定。</summary>
+    private TrackingResult TrackCore(SKBitmap frame)
+    {
         var result = new TrackingResult();
         if (!Tracking || _cal is null || _confirmedOcc is null || _confirmedFrame is null)
         {
@@ -163,7 +263,7 @@ public sealed class TrackingAnalysisService : IDisposable
         {
             case TrackerMatch.Kind.NoChange:
                 result.Result = TrackerMatch.Kind.NoChange;
-                result.Advice = EngineAdvice(_fen, movetimeMs);
+                result.MoveCountText = MoveCountText;
                 return result;
 
             case TrackerMatch.Kind.LostTrack:
@@ -174,24 +274,40 @@ public sealed class TrackingAnalysisService : IDisposable
             default: // Matched
                 var top = match.Top!;
                 _preMatchFen = _fen;
+                _preMatchLogCount = _moveLog.Count;
                 var side0 = SideChar(_fen);
                 _fen = top.ResultingFen;
                 _confirmedOcc = cur;
                 StoreFrame(frame);
                 _lastCandidates = match.Candidates;
+                AppendMovesToLog(top, side0);
                 result.Result = TrackerMatch.Kind.Matched;
                 result.Candidates.AddRange(match.Candidates);
                 result.MoveSummary = FormatMoves(top, side0);
-                result.Advice = EngineAdvice(_fen, movetimeMs);
+                result.MoveCountText = MoveCountText;
                 return result;
         }
     }
 
-    /// <summary>撤销最近一次提交（恢复到匹配前的 FEN）。帧缓存不回退（仍在最新一帧上继续）。</summary>
+    /// <summary>把候选走子序列按 你/对方 追加进本局记录。</summary>
+    private void AppendMovesToLog(MoveCandidate cand, char side0)
+    {
+        var my = _mySideBlack ? 'b' : 'w';
+        for (var i = 0; i < cand.Moves.Count; i++)
+        {
+            var s = (i % 2 == 0) ? side0 : (side0 == 'w' ? 'b' : 'w');
+            _moveLog.Add($"{(s == my ? "你" : "对方")} {cand.MovesChinese[i]}");
+            _moveCount++;
+        }
+    }
+
+    /// <summary>撤销最近一次提交（恢复到匹配前的 FEN，并回退本次提交的全部手数）。帧缓存不回退（仍在最新一帧上继续）。</summary>
     public void Undo()
     {
         _fen = _preMatchFen;
         _lastCandidates = new List<MoveCandidate>();
+        _moveCount -= _moveLog.Count - _preMatchLogCount;
+        _moveLog.RemoveRange(_preMatchLogCount, _moveLog.Count - _preMatchLogCount);
     }
 
     /// <summary>使跟踪失效（切换我方红/黑、或重新标定后调用）：下一次 Analyze 会提示需要重新『新局』。</summary>
@@ -215,6 +331,10 @@ public sealed class TrackingAnalysisService : IDisposable
 
     public int CandidateCount => _lastCandidates.Count;
     public string CurrentFen => _fen;
+    /// <summary>本局至今的中文记谱（每项形如“你 炮二平五”）。</summary>
+    public IReadOnlyList<string> MoveLog => _moveLog;
+    /// <summary>本局累计手数（半手计）。</summary>
+    public int MoveCount => _moveCount;
 
     /// <summary>仅运行 YOLO 检测器，返回置信度 >= minConf 的原始检测框。用于标定等诊断用途。</summary>
     public List<Detection> DetectPieces(SKBitmap frame, float minConf = 0.5f) =>
