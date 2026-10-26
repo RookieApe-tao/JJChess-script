@@ -46,7 +46,7 @@ public sealed class BoardRecognizer : IDisposable
 
     public RecognizedBoard Analyze(SKBitmap image, Calibration? cal, string side = "w", bool reverseRows = false)
     {
-        var boxes = RunDetector(image);
+        var boxes = RunDetector(image).Where(b => b.Conf >= 0.5f).ToList(); // 提高阈值，滤掉光晕/提示点杂框（真棋子通常 0.9+）
         if (cal is not null)
         {
             var minX = cal.Xs.Min();
@@ -169,11 +169,21 @@ public sealed class BoardRecognizer : IDisposable
         var cellw = (maxX - minX) / 8;
         var cellh = (maxY - minY) / 9;
 
-        occ.ColOffset = pinnedColOffset ?? ComputeColOffset(boxes, minX, cellw);
-        occ.RowOffset = pinnedRowOffset ?? ComputeRowOffset(boxes, minY, cellh);
+        if (pinnedColOffset is not null && pinnedRowOffset is not null)
+        {
+            occ.ColOffset = pinnedColOffset.Value;
+            occ.RowOffset = pinnedRowOffset.Value;
+        }
+        else
+        {
+            var (fitCol, fitRow) = FitGridOffsets(boxes, minX, minY, cellw, cellh);
+            occ.ColOffset = pinnedColOffset ?? fitCol;
+            occ.RowOffset = pinnedRowOffset ?? fitRow;
+        }
         var colOffset = occ.ColOffset;
         var rowOffset = occ.RowOffset;
 
+        const float offGridThreshold = 0.45f; // 与 TrackingAnalysisService.SettleThreshold 一致
         foreach (var d in boxes)
         {
             var rowFd = (d.Cy - minY) / cellh;
@@ -182,6 +192,7 @@ public sealed class BoardRecognizer : IDisposable
             var col = Math.Clamp((int)Math.Round(colFd) + colOffset, 0, 8);
             var frac = Math.Max(Math.Abs(rowFd - Math.Round(rowFd)), Math.Abs(colFd - Math.Round(colFd)));
             if (frac > occ.OffGridFraction) occ.OffGridFraction = (float)frac;
+            if (frac > offGridThreshold) occ.OffGridCount++;
             if (reverseRows) { row = 9 - row; col = 8 - col; } // 我方黑：180° 翻转
             if ((uint)row < 10 && (uint)col < 9)
                 occ.Filled[row, col] = true;
@@ -189,20 +200,41 @@ public sealed class BoardRecognizer : IDisposable
         return occ;
     }
 
-    private static int ComputeColOffset(List<Detection> boxes, double minX, double cellw)
+    /// <summary>
+    /// 网格拟合：在 [-2,2]² 偏移候选里选"高置信框中心离格点总距离最小"者。
+    /// 替代旧的 ComputeColOffset（中兵吸附）和 ComputeRowOffset（最上棋子对 row 0），
+    /// 两条路径坐标强制一致，残局不再错位。
+    /// </summary>
+    private static (int ColOffset, int RowOffset) FitGridOffsets(List<Detection> boxes, double minX, double minY, double cellw, double cellh)
     {
-        if (cellw <= 0) return 0;
-        var midX = minX + 4 * cellw; // 中路（第 4 列）的 x
-        var best = boxes.OrderBy(b => Math.Abs(b.Cx - midX)).First();
-        return 4 - (int)Math.Round((best.Cx - minX) / cellw);
-    }
+        if (cellw <= 0 || cellh <= 0 || boxes.Count == 0) return (0, 0);
 
-    /// <summary>垂直行校正：最靠近标定上缘的棋子应位于 row 0。负值表示棋子整体下移（上缘偏高），正值表示上移。</summary>
-    private static int ComputeRowOffset(List<Detection> boxes, double minY, double cellh)
-    {
-        if (cellh <= 0 || boxes.Count == 0) return 0;
-        var top = boxes.OrderBy(b => b.Cy).First();
-        return -(int)Math.Round((top.Cy - minY) / cellh);
+        int bestCol = 0, bestRow = 0;
+        double bestCost = double.MaxValue;
+
+        for (var co = -2; co <= 2; co++)
+        {
+            for (var ro = -2; ro <= 2; ro++)
+            {
+                double totalDist = 0;
+                var used = new HashSet<(int, int)>();
+                foreach (var d in boxes)
+                {
+                    var colFd = (d.Cx - minX) / cellw;
+                    var rowFd = (d.Cy - minY) / cellh;
+                    var snapC = (int)Math.Round(colFd) + co;
+                    var snapR = (int)Math.Round(rowFd) + ro;
+                    if ((uint)snapC > 8 || (uint)snapR > 9) continue; // 出界
+                    totalDist += Math.Abs(colFd - Math.Round(colFd)) + Math.Abs(rowFd - Math.Round(rowFd));
+                    used.Add((snapR, snapC));
+                }
+                // 覆盖率惩罚：重叠（多子挤一格）和越界都增加代价
+                var overlapPenalty = (boxes.Count - used.Count) * 0.5;
+                var cost = totalDist + overlapPenalty;
+                if (cost < bestCost) { bestCost = cost; bestCol = co; bestRow = ro; }
+            }
+        }
+        return (bestCol, bestRow);
     }
 
     private static float Iou(Detection a, Detection b)

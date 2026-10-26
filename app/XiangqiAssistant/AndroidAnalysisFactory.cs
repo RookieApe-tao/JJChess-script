@@ -13,9 +13,16 @@ public static class AndroidAnalysisFactory
 
     public static AnalysisService Create(Context context) => new AnalysisService(BuildRecognizer(context, out var ep, out var nnue), ep, nnue);
 
-    /// <summary>增量跟踪 + 引擎建议服务（主路径）。</summary>
+    /// <summary>增量跟踪 + 引擎建议服务（象棋主路径）。</summary>
     public static TrackingAnalysisService CreateTracking(Context context) =>
         new TrackingAnalysisService(BuildRecognizer(context, out var enginePath, out var nnuePath), enginePath, nnuePath);
+
+    /// <summary>按模式创建悬浮窗顾问:象棋包装 TrackingAnalysisService;五子棋进程内无资产。</summary>
+    public static IGameAdvisor CreateAdvisor(Context context, GameMode mode) => mode switch
+    {
+        GameMode.Gomoku => new GomokuAdvisor(context),
+        _ => new XiangqiAdvisor(CreateTracking(context)),
+    };
 
     private static BoardRecognizer BuildRecognizer(Context context, out string enginePath, out string nnuePath)
     {

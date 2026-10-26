@@ -1,6 +1,7 @@
 using System.Text.Json;
 using SkiaSharp;
 using XiangqiCore;
+using XiangqiCore.Gomoku;
 using XiangqiCore.Recognition;
 
 const string Base = @"D:\Trae CN\project\xiangqi-assistant";
@@ -244,6 +245,213 @@ using (var service = new AnalysisService(Models, Engine, Nnue))
     Check("end-to-end chinese", result.BestMoveChinese ?? "", "兵五进一");
 }
 
+// ---------- gomoku: 模型 ----------
+{
+    // 五连判定:横/竖/斜
+    var p1 = new GomokuPosition();
+    for (var i = 0; i < 5; i++) p1[7, 2 + i] = GomokuStone.Black;
+    Check("gomoku win horizontal", (p1.FindWinner() is { Over: true, Winner: GomokuStone.Black }).ToString(), "True");
+
+    var p2 = new GomokuPosition();
+    for (var i = 0; i < 5; i++) p2[3 + i, 8] = GomokuStone.White;
+    Check("gomoku win vertical", (p2.FindWinner() is { Over: true, Winner: GomokuStone.White }).ToString(), "True");
+
+    var p3 = new GomokuPosition();
+    for (var i = 0; i < 5; i++) p3[4 + i, 4 + i] = GomokuStone.Black;
+    Check("gomoku win diagonal", (p3.FindWinner() is { Over: true, Winner: GomokuStone.Black }).ToString(), "True");
+
+    // 六连也算胜(无禁手)
+    var p4 = new GomokuPosition();
+    for (var i = 0; i < 6; i++) p4[5, 3 + i] = GomokuStone.Black;
+    Check("gomoku win overline", (p4.FindWinner() is { Over: true }).ToString(), "True");
+
+    // 四连不算胜
+    var p5 = new GomokuPosition();
+    for (var i = 0; i < 4; i++) p5[7, 5 + i] = GomokuStone.Black;
+    Check("gomoku four not win", (p5.FindWinner() is null).ToString(), "True");
+
+    // 轮到方:黑先
+    var p6 = new GomokuPosition();
+    Check("gomoku empty side", p6.SideToMove.ToString(), "Black");
+    p6[7, 7] = GomokuStone.Black;
+    Check("gomoku after black", p6.SideToMove.ToString(), "White");
+    p6[8, 8] = GomokuStone.White;
+    Check("gomoku after white", p6.SideToMove.ToString(), "Black");
+
+    // 记谱
+    Check("gomoku cellname H8", GomokuPosition.CellName(7, 7), "H8");
+    Check("gomoku cellname full", GomokuPosition.CellNameFull(7, 7), "H8(8,8)");
+    Check("gomoku cellname A1", GomokuPosition.CellName(0, 0), "A1");
+    Check("gomoku cellname O15", GomokuPosition.CellName(14, 14), "O15");
+}
+
+// ---------- gomoku: 引擎 ----------
+{
+    var engine = new GomokuEngine();
+
+    // 空盘 → 天元
+    var r0 = engine.Search(new GomokuPosition(), 200);
+    Check("gomoku engine empty board tengen", $"{r0.Move!.Value.Row},{r0.Move!.Value.Col}", "7,7");
+
+    // 己方成五点必下:黑在 H8 附近已有四连(两端空)
+    var pWin = new GomokuPosition();
+    for (var i = 0; i < 4; i++) pWin[7, 5 + i] = GomokuStone.Black; // F8..I8 四连
+    pWin[7, 6] = GomokuStone.Black; // 保持黑先(黑5白4 → 轮黑)
+    var rWin = engine.Search(pWin, 500);
+    var winMove = rWin.Move!.Value;
+    // 成五点在 (7,4) 或 (7,9)
+    Check("gomoku engine takes five", ((winMove.Row, winMove.Col) is (7, 4) or (7, 9)).ToString(), "True");
+
+    // 对方活四必挡:白四连两端空,黑只有一子(轮黑)。挡点必须是两端之一
+    var pBlock = new GomokuPosition();
+    for (var i = 0; i < 4; i++) pBlock[7, 5 + i] = GomokuStone.White; // 白四连 F..I
+    pBlock[0, 0] = GomokuStone.Black;
+    var rBlock = engine.Search(pBlock, 500);
+    var bm = rBlock.Move!.Value;
+    Check("gomoku engine blocks open four", ((bm.Row == 7 && (bm.Col == 4 || bm.Col == 9))).ToString(), "True");
+
+    // 对方活三,防守优先级:黑必然挡在两端延伸点 F8/J8 或贴邻
+    var pThreat = new GomokuPosition();
+    for (var i = 0; i < 3; i++) pThreat[7, 6 + i] = GomokuStone.White; // 白活三 G..I
+    pThreat[0, 0] = GomokuStone.Black;
+    var rT = engine.Search(pThreat, 800);
+    var tm = rT.Move!.Value;
+    Console.WriteLine($"[gomoku open-three move] {tm.Name} score={rT.Score}");
+    var nearLine = (tm.Row == 7 && (tm.Col == 5 || tm.Col == 9)) ||
+                   (Math.Abs(tm.Row - 7) <= 1 && tm.Col >= 5 && tm.Col <= 10);
+    Check("gomoku engine answers open three", nearLine.ToString(), "True");
+
+    // VCF:黑双威胁(交叉活三),任一延伸即四三,评分应大幅领先
+    var pVcf = new GomokuPosition();
+    pVcf[7, 6] = GomokuStone.Black; pVcf[7, 7] = GomokuStone.Black; pVcf[7, 8] = GomokuStone.Black; // GHI8 活三
+    pVcf[6, 7] = GomokuStone.Black; // H7
+    pVcf[8, 7] = GomokuStone.Black; // H9 → H 列 H7/H8/H9 三连
+    // 手数平衡:黑5白4 → 轮白。给白加到 5 子,轮黑
+    pVcf[0, 0] = GomokuStone.White; pVcf[0, 1] = GomokuStone.White;
+    pVcf[1, 0] = GomokuStone.White; pVcf[1, 1] = GomokuStone.White;
+    pVcf[14, 14] = GomokuStone.White;
+    var rVcf = engine.Search(pVcf, 1000);
+    var vm = rVcf.Move!.Value;
+    // 正解:下 H 列成四(6,7 或 9,7)或 GHI 延长成四 —— 都是威胁着法;只断言"评分大幅领先"
+    Check("gomoku engine vcf/double threat found", (rVcf.Score >= 100_000).ToString(), "True");
+}
+
+// ---------- gomoku: 识别(合成图) ----------
+SkiaSharp.SKBitmap MakeBoard(bool tilt, int lastMoveRow = -1, int lastMoveCol = -1)
+{
+    // 700x700 木板底色 + 15×15 网格(tilt = x 方向剪切 3%,线与子同歪)+ 黑白圆子
+    var bmp = new SkiaSharp.SKBitmap(new SkiaSharp.SKImageInfo(700, 700, SkiaSharp.SKColorType.Rgba8888, SkiaSharp.SKAlphaType.Unpremul));
+    using (var c = new SkiaSharp.SKCanvas(bmp))
+    {
+        c.Clear(new SkiaSharp.SKColor(220, 179, 92)); // 木板
+        var line = new SkiaSharp.SKPaint { Color = new SkiaSharp.SKColor(60, 40, 20), StrokeWidth = 2f };
+        var step = 620f / 14f;
+        var ox = 40f;
+        float X(float gx, float gy) => ox + gx + (tilt ? (gy - 40f) * 0.03f : 0f); // 剪切:往下越深越往右
+        for (var i = 0; i < 15; i++)
+        {
+            // 竖线:整列同样剪切;横线:各点随 y 剪切 → 网格平行四边形化
+            var vx = ox + i * step;
+            c.DrawLine(X(i * step, 40f), 40f, X(i * step, 660f), 660f, line);
+            var hy = 40 + i * step;
+            c.DrawLine(X(0f, hy), hy, X(620f, hy), hy, line);
+        }
+        void Stone(int r, int col, bool black)
+        {
+            var cx = X(col * step, 40f + r * step);
+            var cy = 40 + r * step;
+            var fill = new SkiaSharp.SKPaint { Color = black ? new SkiaSharp.SKColor(10, 10, 10) : new SkiaSharp.SKColor(245, 245, 245) };
+            c.DrawCircle(cx, cy, step * 0.4f, fill);
+        }
+        // 一局对杀:黑白各 5 子
+        Stone(7, 7, true); Stone(7, 8, false);
+        Stone(6, 8, true); Stone(8, 6, false);
+        Stone(6, 6, true); Stone(8, 8, false);
+        Stone(5, 9, true); Stone(6, 9, false);
+        Stone(0, 14, true); Stone(14, 0, false); // 角落子
+        if (lastMoveRow >= 0)
+        {
+            var cx = X(lastMoveCol * step, 40f + lastMoveRow * step);
+            var cy = 40 + lastMoveRow * step;
+            var red = new SkiaSharp.SKPaint { Color = new SkiaSharp.SKColor(255, 0, 0) };
+            c.DrawCircle(cx, cy, step * 0.12f, red);
+        }
+        c.Flush();
+    }
+    return bmp;
+}
+
+{
+
+    var recognizer = new GomokuRecognizer();
+
+    using (var board = MakeBoard(tilt: false, lastMoveRow: 5, lastMoveCol: 9))
+    {
+        var rect = new GomokuRect(20, 20, 680, 680);
+        var detected = recognizer.RefineGrid(board, rect);
+        Check("gomoku grid detected", detected.ToString(), "True");
+        var read = recognizer.Read(board, rect);
+        var pos = read.Position;
+        Check("gomoku read stone counts", $"{pos.BlackCount},{pos.WhiteCount}", "5,5");
+        Check("gomoku read H8 black", pos[7, 7].ToString(), "Black");
+        Check("gomoku read I8 white", pos[7, 8].ToString(), "White");
+        Check("gomoku read corner black", pos[0, 14].ToString(), "Black");
+        Check("gomoku read corner white", pos[14, 0].ToString(), "White");
+        Check("gomoku read empty cell", (pos[0, 0] is null).ToString(), "True");
+        Check("gomoku last move hint", $"{read.LastMoveHint?.Row},{read.LastMoveHint?.Col}", "5,9");
+        // 屏幕坐标映射回棋盘中心附近(格点 ~ (40+col*44.286))
+        var (sx, sy) = recognizer.ScreenPoint(7, 7, rect);
+        var near = Math.Abs(sx - 40 - 7 * 620f / 14f - (20 - 28 /* pad 4% of 660 */)) < 8;
+        Check("gomoku screen point H8", near.ToString(), "True");
+    }
+
+    using (var boardTilt = MakeBoard(tilt: true))
+    {
+        var rect = new GomokuRect(20, 20, 680, 680);
+        var detected = recognizer.RefineGrid(boardTilt, rect);
+        // 剪切 3% 超出投影法直线假设(整条竖线在投影里弥散);此时应回退等分而不是误检
+        Check("gomoku sheared grid fallback (no misdetect)", (detected == false).ToString(), "True");
+        var read = recognizer.Read(boardTilt, rect);
+        var pos = read.Position;
+        // 回退等分下中央区域仍应识别(剪切偏差在角落最大)
+        Check("gomoku sheared H8 black", pos[7, 7].ToString(), "Black");
+    }
+}
+
+// ---------- gomoku: 编排服务 ----------
+{
+    // 复用上面合成图思路做一次端到端(识别+引擎)
+    using var bmp = new SkiaSharp.SKBitmap(new SkiaSharp.SKImageInfo(700, 700, SkiaSharp.SKColorType.Rgba8888, SkiaSharp.SKAlphaType.Unpremul));
+    using (var c = new SkiaSharp.SKCanvas(bmp))
+    {
+        c.Clear(new SkiaSharp.SKColor(220, 179, 92));
+        var line = new SkiaSharp.SKPaint { Color = new SkiaSharp.SKColor(60, 40, 20), StrokeWidth = 2f };
+        var step = 620f / 14f;
+        for (var i = 0; i < 15; i++)
+        {
+            c.DrawLine(40 + i * step, 40, 40 + i * step, 660, line);
+            c.DrawLine(40, 40 + i * step, 660, 40 + i * step, line);
+        }
+        void Stone(int r, int col, bool black)
+        {
+            var fill = new SkiaSharp.SKPaint { Color = black ? new SkiaSharp.SKColor(10, 10, 10) : new SkiaSharp.SKColor(245, 245, 245) };
+            c.DrawCircle(40 + col * step, 40 + r * step, step * 0.4f, fill);
+        }
+        Stone(7, 7, true); Stone(7, 8, false); Stone(6, 8, true); // 黑2白1 → 轮白
+        c.Flush();
+    }
+    using var svc = new GomokuAnalysisService();
+    var calMsg = svc.Calibrate(bmp, new GomokuRect(20, 20, 680, 680));
+    Console.WriteLine($"[gomoku calibrate] {calMsg.Replace("\n", " | ")}");
+    var advice = svc.Analyze(bmp, GomokuStone.White, 800);
+    Console.WriteLine($"[gomoku advice] {advice.Text.Replace("\n", " | ")} marker={advice.MarkerPoint}");
+    Check("gomoku svc analyze ok", advice.Ok.ToString(), "True");
+    Check("gomoku svc has marker", (advice.MarkerPoint is not null).ToString(), "True");
+    Check("gomoku svc mentions white", advice.Text.Contains("白").ToString(), "True");
+    var resetMsg = svc.Reset();
+    Check("gomoku svc reset", resetMsg.Contains("清盘").ToString(), "True");
+}
+
 Console.WriteLine(failures == 0 ? "\nALL PASS" : $"\n{failures} FAILURES");
 
 if (args.Contains("boxes"))
@@ -297,6 +505,45 @@ if (args.Contains("cells"))
             Console.WriteLine(
                 $"[{kv.Key.Row},{kv.Key.Col}] piece={kv.Value.Piece} prob={kv.Value.Prob:F4} " +
                 $"corrected={kv.Value.Corrected} alts={string.Join(",", kv.Value.Alts.Select(a => $"{a.Piece}:{a.Prob:F3}"))}");
+    }
+}
+
+// gomoku 诊断:dotnet run -- gomoku <图片> [x1 y1 x2 y2]
+// 不给矩形时用整图。打印格点、亮度矩阵、ASCII 盘面,供真实截图调阈值。
+if (args.Contains("gomoku"))
+{
+    var idx = Array.IndexOf(args, "gomoku");
+    var img = args.Length > idx + 1 ? args[idx + 1] : Base + @"\screenshots\gomoku_sample.png";
+    if (!File.Exists(img))
+    {
+        Console.WriteLine($"[gomoku] 图片不存在: {img}");
+    }
+    else
+    {
+        using var bmp = SKBitmap.Decode(img);
+        GomokuRect rect = args.Length > idx + 5
+            ? new GomokuRect(float.Parse(args[idx + 2]), float.Parse(args[idx + 3]), float.Parse(args[idx + 4]), float.Parse(args[idx + 5]))
+            : new GomokuRect(0, 0, bmp.Width - 1, bmp.Height - 1);
+        var recog = new GomokuRecognizer();
+        var detected = recog.RefineGrid(bmp, rect);
+        var info = recog.GridInfo;
+        Console.WriteLine($"[gomoku] grid detected={detected} step={(info?.Step ?? 0):F1}px " +
+                          $"xs=[{string.Join(",", info!.Value.Xs.Select(v => v.ToString("F0")))}] " +
+                          $"ys=[{string.Join(",", info.Value.Ys.Select(v => v.ToString("F0")))}]");
+        var read = recog.Read(bmp, rect);
+        Console.WriteLine($"[gomoku] black={read.Position.BlackCount} white={read.Position.WhiteCount} " +
+                          $"hint={(read.LastMoveHint is { } h ? GomokuPosition.CellNameFull(h.Row, h.Col) : "无")} warn={read.Warning ?? "无"}");
+        Console.WriteLine("[gomoku] 亮度矩阵(空=空格,黑/白棋子位显示数值):");
+        for (var r = 0; r < GomokuPosition.Size; r++)
+        {
+            var rowTxt = "";
+            for (var c = 0; c < GomokuPosition.Size; c++)
+            {
+                var s = read.Position[r, c];
+                rowTxt += s is null ? "  ." : (s == GomokuStone.Black ? " B" : " W");
+            }
+            Console.WriteLine($"  {(char)('A' + 0)}{rowTxt}  brightness[0..3]={read.Brightness[r, 0]},{read.Brightness[r, 1]},{read.Brightness[r, 2]},{read.Brightness[r, 3]}");
+        }
     }
 }
 

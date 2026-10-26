@@ -43,5 +43,7 @@ public sealed class Occupancy
     public int RowOffset;
     /// <summary>0..0.5：检测框中心离最近格点的最大分数距离，>0.35 视为棋子仍在移动（动画中途）。</summary>
     public float OffGridFraction;
+    /// <summary>离格的棋子数量（中心离格点 > SettleThreshold 的检测框数）。</summary>
+    public int OffGridCount;
 }
 

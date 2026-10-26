@@ -8,7 +8,7 @@ namespace XiangqiAssistant;
 
 public static class AssistantStarter
 {
-    public static async Task<bool> PrepareAsync()
+    public static async Task<bool> PrepareAsync(GameMode mode = GameMode.Xiangqi)
     {
         var activity = Platform.CurrentActivity;
         if (activity is null) return false;
@@ -30,7 +30,7 @@ public static class AssistantStarter
         }
 
         if (activity is MainActivity main)
-            main.RequestScreenCapture();
+            main.RequestScreenCapture(mode);
         return true;
     }
 

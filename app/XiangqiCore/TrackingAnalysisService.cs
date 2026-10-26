@@ -26,7 +26,7 @@ public sealed class TrackingAnalysisService : IDisposable
 {
     public const string StandardStart = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w";
 
-    private const float SettleThreshold = 0.35f; // 检测框中心离格点超过此分数 -> 视为棋子仍在移动
+    private const float SettleThreshold = 0.45f; // 检测框中心离格点超过此分数 -> 视为棋子仍在移动（放宽以兼容选中悬浮）
 
     private readonly MoveTracker _tracker;
     private readonly BoardRecognizer _recognizer; // 应急重校需绕过跟踪直接全量识别
@@ -253,6 +253,14 @@ public sealed class TrackingAnalysisService : IDisposable
         var cur = _tracker.BuildOccupancy(frame, _cal, _mySideBlack, _pinnedColOffset, _pinnedRowOffset);
         if (cur.OffGridFraction > SettleThreshold)
         {
+            // 单个棋子离格（选中悬浮）且占位与已知一致 → 不拦截，继续跟踪
+            if (cur.OffGridCount <= 1 && OccupancyConsistent(cur, _confirmedOcc))
+            {
+                // 占位没变（选中不等于走子），按 NoChange 处理
+                result.Result = TrackerMatch.Kind.NoChange;
+                result.MoveCountText = MoveCountText;
+                return result;
+            }
             result.Result = TrackerMatch.Kind.LostTrack;
             result.Reason = "棋子仍在移动，请稍候再点『分析』。";
             return result;
@@ -335,6 +343,16 @@ public sealed class TrackingAnalysisService : IDisposable
     public IReadOnlyList<string> MoveLog => _moveLog;
     /// <summary>本局累计手数（半手计）。</summary>
     public int MoveCount => _moveCount;
+
+    /// <summary>当前占位与已确认占位是否完全一致（选中悬浮不改变占位时用）。</summary>
+    private static bool OccupancyConsistent(Occupancy cur, Occupancy? confirmed)
+    {
+        if (confirmed is null) return false;
+        for (var r = 0; r < 10; r++)
+            for (var c = 0; c < 9; c++)
+                if (cur.Filled[r, c] != confirmed.Filled[r, c]) return false;
+        return true;
+    }
 
     /// <summary>仅运行 YOLO 检测器，返回置信度 >= minConf 的原始检测框。用于标定等诊断用途。</summary>
     public List<Detection> DetectPieces(SKBitmap frame, float minConf = 0.5f) =>

@@ -11,8 +11,11 @@ public class MainActivity : MauiAppCompatActivity
 {
     private const int CaptureRequestCode = 1001;
 
-    public void RequestScreenCapture()
+    private GameMode _mode = GameMode.Xiangqi;
+
+    public void RequestScreenCapture(GameMode mode)
     {
+        _mode = mode;
         var mpm = (MediaProjectionManager)GetSystemService(MediaProjectionService)!;
         StartActivityForResult(mpm.CreateScreenCaptureIntent(), CaptureRequestCode);
     }
@@ -25,6 +28,7 @@ public class MainActivity : MauiAppCompatActivity
             intent.SetAction(AssistantService.ActionStart);
             intent.PutExtra(AssistantService.ExtraCode, (int)resultCode);
             intent.PutExtra(AssistantService.ExtraData, data);
+            intent.PutExtra(AssistantService.ExtraMode, _mode == GameMode.Gomoku ? "gomoku" : "xiangqi");
             StartForegroundService(intent);
         }
         base.OnActivityResult(requestCode, resultCode, data);
